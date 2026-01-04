@@ -1,5 +1,7 @@
 import express from 'express';
 import cors from 'cors';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
 import multer from 'multer';
 import { randomUUID } from 'crypto';
 import { fileURLToPath } from 'url';
@@ -34,12 +36,50 @@ const ADMIN_API_KEY = process.env.API_KEY; // Admin/legacy API key
 const CORS_ORIGINS = process.env.CORS_ORIGINS?.split(',').map(s => s.trim()) || ['*'];
 const MAX_CONCURRENT = parseInt(process.env.MAX_CONCURRENT_BUILDS || '2');
 const BUILD_TIMEOUT = parseInt(process.env.BUILD_TIMEOUT_MS || '600000');
+const MAX_QUEUE_SIZE = parseInt(process.env.MAX_QUEUE_SIZE || '50');
+const MAX_BUILDS_PER_USER = parseInt(process.env.MAX_BUILDS_PER_USER || '3');
 
 // Build state
 const builds = new Map();
+const userBuildCounts = new Map(); // Track builds per user
 const queue = new BuildQueue(MAX_CONCURRENT);
 
-// Middleware
+// Security middleware
+app.use(helmet({
+  contentSecurityPolicy: false, // Allow inline scripts for landing page
+  crossOriginEmbedderPolicy: false
+}));
+
+// Rate limiting
+const generalLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 60, // 60 requests per minute
+  message: { error: 'Too many requests, please try again later' },
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
+const authLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 10, // 10 auth attempts per minute
+  message: { error: 'Too many authentication attempts' },
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
+const buildLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 20, // 20 builds per hour
+  message: { error: 'Build rate limit exceeded. Try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
+app.use('/api/', generalLimiter);
+app.use('/api/auth', authLimiter);
+app.use('/api/build', buildLimiter);
+
+// CORS middleware
 app.use(cors({
   origin: CORS_ORIGINS.includes('*') ? true : CORS_ORIGINS,
   credentials: true
@@ -47,27 +87,54 @@ app.use(cors({
 app.use(express.json());
 app.use(express.static(join(__dirname, 'public')));
 
-// API Key authentication - supports admin key and per-user keys
+// API Key authentication - header only (query string removed for security)
 const authenticate = (req, res, next) => {
-  const providedKey = req.headers['x-api-key'] || req.query.apiKey;
+  const providedKey = req.headers['x-api-key'];
+
+  if (!providedKey) {
+    return res.status(401).json({ error: 'Missing API key. Use X-API-Key header.' });
+  }
 
   // Check admin API key first
   if (ADMIN_API_KEY && providedKey === ADMIN_API_KEY) {
     req.isAdmin = true;
+    req.userId = 'admin';
     return next();
   }
 
   // Check per-user API key
-  if (providedKey) {
-    const result = validateApiKey(providedKey);
-    if (result.valid) {
-      req.pubkey = result.pubkey;
-      return next();
-    }
+  const result = validateApiKey(providedKey);
+  if (result.valid) {
+    req.pubkey = result.pubkey;
+    req.userId = result.pubkey;
+    return next();
   }
 
   // No valid auth
-  return res.status(401).json({ error: 'Invalid or missing API key' });
+  return res.status(401).json({ error: 'Invalid API key' });
+};
+
+// Build ownership check middleware
+const checkBuildOwnership = (req, res, next) => {
+  const build = builds.get(req.params.buildId);
+
+  if (!build) {
+    return res.status(404).json({ error: 'Build not found' });
+  }
+
+  // Admin can access any build
+  if (req.isAdmin) {
+    req.build = build;
+    return next();
+  }
+
+  // Check if user owns this build
+  if (build.userId !== req.userId) {
+    return res.status(403).json({ error: 'Access denied. You do not own this build.' });
+  }
+
+  req.build = build;
+  next();
 };
 
 // Health check (no auth required)
@@ -155,6 +222,24 @@ app.post('/api/build', authenticate, upload.single('project'), async (req, res) 
       return res.status(400).json({ error: 'No project ZIP provided' });
     }
 
+    // Check queue size limit
+    const queueStatus = queue.getStatus();
+    if (queueStatus.queued >= MAX_QUEUE_SIZE) {
+      return res.status(503).json({
+        error: 'Build queue is full. Please try again later.',
+        queueSize: queueStatus.queued
+      });
+    }
+
+    // Check per-user build limit (active builds only)
+    const userActiveBuilds = userBuildCounts.get(req.userId) || 0;
+    if (userActiveBuilds >= MAX_BUILDS_PER_USER) {
+      return res.status(429).json({
+        error: `You have ${userActiveBuilds} active builds. Maximum is ${MAX_BUILDS_PER_USER}. Wait for builds to complete.`,
+        activeBuilds: userActiveBuilds
+      });
+    }
+
     let config;
     try {
       config = JSON.parse(req.body.config || '{}');
@@ -173,13 +258,32 @@ app.post('/api/build', authenticate, upload.single('project'), async (req, res) 
       });
     }
 
-    // Sanitize inputs
-    config.appName = config.appName.slice(0, 50).replace(/[<>:"/\\|?*]/g, '');
+    // Validate buildType
+    if (config.buildType && !['debug', 'release'].includes(config.buildType)) {
+      return res.status(400).json({ error: 'buildType must be "debug" or "release"' });
+    }
+
+    // Validate primaryColor format if provided
+    if (config.primaryColor && !/^#[0-9A-Fa-f]{6}$/.test(config.primaryColor)) {
+      return res.status(400).json({ error: 'primaryColor must be hex format like #FF5733' });
+    }
+
+    // Sanitize appName - remove shell metacharacters and control chars
+    config.appName = config.appName
+      .slice(0, 50)
+      .replace(/[<>:"/\\|?*`$();&\n\r\t]/g, '')
+      .trim();
+
+    if (!config.appName) {
+      return res.status(400).json({ error: 'appName contains only invalid characters' });
+    }
+
     config.packageId = config.packageId.toLowerCase();
 
     const buildId = randomUUID();
     const buildState = {
       id: buildId,
+      userId: req.userId, // Track ownership
       status: 'queued',
       progress: 0,
       config,
@@ -188,6 +292,9 @@ app.post('/api/build', authenticate, upload.single('project'), async (req, res) 
     };
 
     builds.set(buildId, buildState);
+
+    // Increment user's active build count
+    userBuildCounts.set(req.userId, userActiveBuilds + 1);
 
     // Add to queue
     queue.add(async () => {
@@ -200,10 +307,18 @@ app.post('/api/build', authenticate, upload.single('project'), async (req, res) 
           build.error = error.message;
           build.logs.push(`[ERROR] ${error.message}`);
         }
+      } finally {
+        // Decrement user's active build count when done
+        const currentCount = userBuildCounts.get(req.userId) || 1;
+        if (currentCount <= 1) {
+          userBuildCounts.delete(req.userId);
+        } else {
+          userBuildCounts.set(req.userId, currentCount - 1);
+        }
       }
     });
 
-    console.log(`Build ${buildId} queued for ${config.appName} (${config.packageId})`);
+    console.log(`Build ${buildId} queued for ${config.appName} (${config.packageId}) by ${req.userId.slice(0, 8)}...`);
 
     res.json({
       buildId,
@@ -217,13 +332,9 @@ app.post('/api/build', authenticate, upload.single('project'), async (req, res) 
   }
 });
 
-// Get build status
-app.get('/api/build/:buildId/status', authenticate, (req, res) => {
-  const build = builds.get(req.params.buildId);
-
-  if (!build) {
-    return res.status(404).json({ error: 'Build not found' });
-  }
+// Get build status (with ownership check)
+app.get('/api/build/:buildId/status', authenticate, checkBuildOwnership, (req, res) => {
+  const build = req.build;
 
   res.json({
     id: build.id,
@@ -241,13 +352,9 @@ app.get('/api/build/:buildId/status', authenticate, (req, res) => {
   });
 });
 
-// Download APK
-app.get('/api/build/:buildId/download', authenticate, (req, res) => {
-  const build = builds.get(req.params.buildId);
-
-  if (!build) {
-    return res.status(404).json({ error: 'Build not found' });
-  }
+// Download APK (with ownership check)
+app.get('/api/build/:buildId/download', authenticate, checkBuildOwnership, (req, res) => {
+  const build = req.build;
 
   if (build.status !== 'complete') {
     return res.status(400).json({
@@ -268,13 +375,9 @@ app.get('/api/build/:buildId/download', authenticate, (req, res) => {
   });
 });
 
-// Get build logs (full)
-app.get('/api/build/:buildId/logs', authenticate, (req, res) => {
-  const build = builds.get(req.params.buildId);
-
-  if (!build) {
-    return res.status(404).json({ error: 'Build not found' });
-  }
+// Get build logs (with ownership check)
+app.get('/api/build/:buildId/logs', authenticate, checkBuildOwnership, (req, res) => {
+  const build = req.build;
 
   res.json({
     id: build.id,
@@ -283,17 +386,20 @@ app.get('/api/build/:buildId/logs', authenticate, (req, res) => {
   });
 });
 
-// Cancel build (if still queued)
-app.delete('/api/build/:buildId', authenticate, (req, res) => {
-  const build = builds.get(req.params.buildId);
-
-  if (!build) {
-    return res.status(404).json({ error: 'Build not found' });
-  }
+// Cancel build (with ownership check)
+app.delete('/api/build/:buildId', authenticate, checkBuildOwnership, (req, res) => {
+  const build = req.build;
 
   if (build.status === 'queued') {
     build.status = 'cancelled';
-    console.log(`Build ${build.id} cancelled`);
+    // Decrement user's active build count
+    const currentCount = userBuildCounts.get(build.userId) || 1;
+    if (currentCount <= 1) {
+      userBuildCounts.delete(build.userId);
+    } else {
+      userBuildCounts.set(build.userId, currentCount - 1);
+    }
+    console.log(`Build ${build.id} cancelled by ${req.userId.slice(0, 8)}...`);
     res.json({ message: 'Build cancelled' });
   } else {
     res.status(400).json({
@@ -303,9 +409,16 @@ app.delete('/api/build/:buildId', authenticate, (req, res) => {
   }
 });
 
-// List recent builds (admin endpoint)
+// List builds (admin sees all, users see their own)
 app.get('/api/builds', authenticate, (req, res) => {
-  const buildList = Array.from(builds.values())
+  let buildList = Array.from(builds.values());
+
+  // Non-admin users only see their own builds
+  if (!req.isAdmin) {
+    buildList = buildList.filter(b => b.userId === req.userId);
+  }
+
+  buildList = buildList
     .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
     .slice(0, 50)
     .map(b => ({
