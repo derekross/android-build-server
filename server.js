@@ -40,6 +40,7 @@ app.use(cors({
   credentials: true
 }));
 app.use(express.json());
+app.use(express.static('public'));
 
 // API Key authentication - supports admin key and per-user keys
 const authenticate = (req, res, next) => {
