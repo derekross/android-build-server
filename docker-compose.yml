@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  apk-builder:
+    build: .
+    container_name: apk-build-service
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:3000"
+    volumes:
+      # Persist Gradle cache for faster builds
+      - gradle-cache:/root/.gradle
+      # Persist npm cache
+      - npm-cache:/root/.npm
+      # Persist Android debug keystore for consistent signing
+      - android-config:/root/.android
+      # Persist API keys and user data
+      - api-data:/data
+    environment:
+      - NODE_ENV=production
+      - API_KEY=${API_KEY}
+      - MAX_CONCURRENT_BUILDS=${MAX_CONCURRENT_BUILDS:-2}
+      - BUILD_TIMEOUT_MS=${BUILD_TIMEOUT_MS:-600000}
+      - CORS_ORIGINS=${CORS_ORIGINS:-*}
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 2G
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  gradle-cache:
+  npm-cache:
+  android-config:
+  api-data:
