@@ -121,9 +121,6 @@ BUILD_TIMEOUT_MS=600000
 CORS_ORIGINS=*
 ENV_EOF
 
-# Make test.sh executable
-chmod +x test.sh
-
 echo -e "${GREEN}Configuration complete!${NC}"
 
 # Build and optionally start
