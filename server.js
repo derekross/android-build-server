@@ -53,7 +53,7 @@ app.use(helmet({
 // Rate limiting
 const generalLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
-  max: 60, // 60 requests per minute
+  max: 120, // 120 requests per minute (allows for status polling)
   message: { error: 'Too many requests, please try again later' },
   standardHeaders: true,
   legacyHeaders: false
@@ -67,9 +67,9 @@ const authLimiter = rateLimit({
   legacyHeaders: false
 });
 
-const buildLimiter = rateLimit({
+const buildSubmitLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
-  max: 20, // 20 builds per hour
+  max: 20, // 20 build submissions per hour
   message: { error: 'Build rate limit exceeded. Try again later.' },
   standardHeaders: true,
   legacyHeaders: false
@@ -77,7 +77,7 @@ const buildLimiter = rateLimit({
 
 app.use('/api/', generalLimiter);
 app.use('/api/auth', authLimiter);
-app.use('/api/build', buildLimiter);
+// Note: buildSubmitLimiter applied only to POST /api/build in route definition
 
 // CORS middleware
 app.use(cors({
@@ -215,8 +215,8 @@ app.get('/api/auth/stats', authenticate, (req, res) => {
 // Build Endpoints
 // =============================================================================
 
-// Submit build
-app.post('/api/build', authenticate, upload.single('project'), async (req, res) => {
+// Submit build (with rate limiting for submissions only)
+app.post('/api/build', buildSubmitLimiter, authenticate, upload.single('project'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No project ZIP provided' });
