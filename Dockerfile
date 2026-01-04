@@ -30,11 +30,15 @@ RUN mkdir -p $ANDROID_HOME/cmdline-tools && \
     mv cmdline-tools latest
 
 # Accept licenses and install SDK components
+# Install multiple versions for compatibility with different Capacitor/Gradle versions
 RUN yes | sdkmanager --licenses > /dev/null 2>&1 && \
     sdkmanager --install \
       "platform-tools" \
       "platforms;android-34" \
+      "platforms;android-33" \
       "build-tools;34.0.0" \
+      "build-tools;33.0.2" \
+      "build-tools;30.0.3" \
       > /dev/null 2>&1
 
 # Create non-root user for running the app with home directory
