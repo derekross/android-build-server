@@ -2,6 +2,11 @@ import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
 import { randomUUID } from 'crypto';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 import { BuildQueue } from './lib/queue.js';
 import { buildAPK } from './lib/builder.js';
 import {
@@ -40,7 +45,7 @@ app.use(cors({
   credentials: true
 }));
 app.use(express.json());
-app.use(express.static('public'));
+app.use(express.static(join(__dirname, 'public')));
 
 // API Key authentication - supports admin key and per-user keys
 const authenticate = (req, res, next) => {
