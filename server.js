@@ -6,6 +6,7 @@ import multer from 'multer';
 import { randomUUID } from 'crypto';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import fs from 'fs/promises';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -485,6 +486,35 @@ process.on('SIGTERM', () => {
 async function start() {
   // Initialize auth module
   await initAuth();
+
+  // Cleanup orphaned APK files from previous runs
+  try {
+    const outputDir = '/tmp/output';
+    const files = await fs.readdir(outputDir);
+    const maxAge = 60 * 60 * 1000; // 1 hour
+    const now = Date.now();
+    let cleaned = 0;
+
+    for (const file of files) {
+      if (file.endsWith('.apk')) {
+        const filePath = join(outputDir, file);
+        const stats = await fs.stat(filePath);
+        if (now - stats.mtimeMs > maxAge) {
+          await fs.unlink(filePath);
+          cleaned++;
+        }
+      }
+    }
+
+    if (cleaned > 0) {
+      console.log(`Startup: Cleaned ${cleaned} orphaned APK files`);
+    }
+  } catch (err) {
+    // Directory might not exist yet, that's fine
+    if (err.code !== 'ENOENT') {
+      console.error('Startup cleanup error:', err.message);
+    }
+  }
 
   app.listen(PORT, () => {
     console.log('');
