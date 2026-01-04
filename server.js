@@ -14,6 +14,10 @@ import {
 } from './lib/auth.js';
 
 const app = express();
+
+// Trust reverse proxy (nginx, etc.) for correct protocol detection
+app.set('trust proxy', true);
+
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 100 * 1024 * 1024 } // 100MB max
