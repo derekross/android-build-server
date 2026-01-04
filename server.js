@@ -137,11 +137,19 @@ const checkBuildOwnership = (req, res, next) => {
   next();
 };
 
-// Health check (no auth required)
+// Health check (no auth required) - minimal info to avoid disclosure
 app.get('/health', (req, res) => {
+  res.json({ status: 'ok' });
+});
+
+// Detailed stats (auth required)
+app.get('/api/stats', authenticate, (req, res) => {
+  if (!req.isAdmin) {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
   res.json({
     status: 'ok',
-    version: '1.0.0',
+    version: '1.1.0',
     queue: queue.getStatus(),
     activeBuilds: builds.size,
     uptime: process.uptime()
@@ -215,11 +223,25 @@ app.get('/api/auth/stats', authenticate, (req, res) => {
 // Build Endpoints
 // =============================================================================
 
+// Validate ZIP file magic bytes
+function isValidZip(buffer) {
+  if (!buffer || buffer.length < 4) return false;
+  // ZIP magic bytes: PK\x03\x04 (local file header) or PK\x05\x06 (empty archive)
+  return (buffer[0] === 0x50 && buffer[1] === 0x4B &&
+          (buffer[2] === 0x03 || buffer[2] === 0x05) &&
+          (buffer[3] === 0x04 || buffer[3] === 0x06));
+}
+
 // Submit build (with rate limiting for submissions only)
 app.post('/api/build', buildSubmitLimiter, authenticate, upload.single('project'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No project ZIP provided' });
+    }
+
+    // Validate ZIP magic bytes
+    if (!isValidZip(req.file.buffer)) {
+      return res.status(400).json({ error: 'Invalid file format. Must be a ZIP file.' });
     }
 
     // Check queue size limit
