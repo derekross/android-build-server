@@ -37,8 +37,8 @@ RUN yes | sdkmanager --licenses > /dev/null 2>&1 && \
       "build-tools;34.0.0" \
       > /dev/null 2>&1
 
-# Create non-root user for running the app
-RUN groupadd -r apkbuild && useradd -r -g apkbuild apkbuild
+# Create non-root user for running the app with home directory
+RUN groupadd -r apkbuild && useradd -r -g apkbuild -m -d /home/apkbuild apkbuild
 
 # Create app directory
 WORKDIR /app
@@ -52,7 +52,7 @@ COPY . .
 
 # Create directories for builds and set permissions
 RUN mkdir -p /tmp/builds /tmp/output /app/data && \
-    chown -R apkbuild:apkbuild /tmp/builds /tmp/output /app/data && \
+    chown -R apkbuild:apkbuild /tmp/builds /tmp/output /app/data /home/apkbuild && \
     chown -R apkbuild:apkbuild /app && \
     chmod -R 755 $ANDROID_HOME
 
