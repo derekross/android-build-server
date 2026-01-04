@@ -55,6 +55,32 @@ curl -X POST http://localhost:3000/api/auth \
 ### Health Check
 ```bash
 curl http://localhost:3000/health
+# Returns: { "status": "ok" }
+```
+
+### Server Stats (Admin Only)
+```bash
+curl http://localhost:3000/api/stats \
+  -H "X-API-Key: YOUR_ADMIN_API_KEY"
+```
+
+Returns build statistics including:
+```json
+{
+  "status": "ok",
+  "version": "1.1.0",
+  "builds": {
+    "total": 42,
+    "successful": 38,
+    "failed": 3,
+    "cancelled": 1,
+    "active": 2,
+    "lastBuildAt": "2025-01-04T12:34:56.789Z"
+  },
+  "queue": { "queued": 1, "processing": 1 },
+  "uptime": 3600,
+  "startedAt": "2025-01-01T00:00:00.000Z"
+}
 ```
 
 ### Submit Build
@@ -77,6 +103,18 @@ curl -o app.apk http://localhost:3000/api/build/{buildId}/download \
   -H "X-API-Key: YOUR_API_KEY"
 ```
 
+### List Your Builds
+```bash
+curl http://localhost:3000/api/builds \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+### Cancel Build
+```bash
+curl -X DELETE http://localhost:3000/api/build/{buildId} \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
 ## Commands
 
 ```bash
@@ -96,6 +134,42 @@ docker compose up -d --build
 ./test.sh
 ```
 
+## Rate Limits
+
+The server applies rate limiting to prevent abuse:
+
+| Endpoint | Limit | Window |
+|----------|-------|--------|
+| General API (`/api/*`) | 120 requests | 1 minute |
+| Authentication (`/api/auth`) | 10 requests | 1 minute |
+| Build submission (`POST /api/build`) | 20 requests | 1 hour |
+
+Additionally, each user is limited to **3 concurrent active builds**.
+
+## Security
+
+### Build Ownership
+- Users can only access their own builds (status, download, cancel)
+- Admin API key can access all builds
+- Build records are automatically cleaned up after 1 hour
+
+### Input Validation
+- ZIP files are validated for magic bytes before processing
+- Path traversal (ZIP Slip) attacks are blocked
+- App names and package IDs are sanitized
+- File size limits enforced (100MB upload, 50MB per file in ZIP)
+
+### Isolation
+- Builds run in Docker containers
+- Non-root user execution (`apkbuild`)
+- Environment variables filtered (secrets not passed to Gradle)
+- npm lifecycle scripts disabled (`--ignore-scripts`)
+
+### APK Cleanup
+- Build directories cleaned immediately after completion
+- APK files automatically deleted after 1 hour
+- Orphaned APKs cleaned on server startup
+
 ## Project Structure
 
 ```
@@ -107,7 +181,8 @@ android-build-server/
 ├── lib/
 │   ├── auth.js         # NIP-98 authentication
 │   ├── builder.js      # APK build logic
-│   └── queue.js        # Build queue management
+│   ├── queue.js        # Build queue management
+│   └── stats.js        # Persistent build statistics
 ├── setup.sh            # Setup script
 ├── test.sh             # Test script
 └── .env                # Configuration (generated)

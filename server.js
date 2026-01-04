@@ -20,6 +20,12 @@ import {
   revokeApiKey,
   getAuthStats
 } from './lib/auth.js';
+import {
+  initStats,
+  getStats,
+  recordBuildSubmitted,
+  recordBuildCancelled
+} from './lib/stats.js';
 
 const app = express();
 
@@ -148,12 +154,21 @@ app.get('/api/stats', authenticate, (req, res) => {
   if (!req.isAdmin) {
     return res.status(403).json({ error: 'Admin access required' });
   }
+  const persistentStats = getStats();
   res.json({
     status: 'ok',
     version: '1.1.0',
+    builds: {
+      total: persistentStats.totalBuilds,
+      successful: persistentStats.successfulBuilds,
+      failed: persistentStats.failedBuilds,
+      cancelled: persistentStats.cancelledBuilds,
+      active: builds.size,
+      lastBuildAt: persistentStats.lastBuildAt
+    },
     queue: queue.getStatus(),
-    activeBuilds: builds.size,
-    uptime: process.uptime()
+    uptime: process.uptime(),
+    startedAt: persistentStats.startedAt
   });
 });
 
@@ -319,6 +334,9 @@ app.post('/api/build', buildSubmitLimiter, authenticate, upload.single('project'
     // Increment user's active build count
     userBuildCounts.set(req.userId, userActiveBuilds + 1);
 
+    // Record build in persistent stats
+    await recordBuildSubmitted();
+
     // Add to queue
     queue.add(async () => {
       try {
@@ -410,7 +428,7 @@ app.get('/api/build/:buildId/logs', authenticate, checkBuildOwnership, (req, res
 });
 
 // Cancel build (with ownership check)
-app.delete('/api/build/:buildId', authenticate, checkBuildOwnership, (req, res) => {
+app.delete('/api/build/:buildId', authenticate, checkBuildOwnership, async (req, res) => {
   const build = req.build;
 
   if (build.status === 'queued') {
@@ -422,6 +440,8 @@ app.delete('/api/build/:buildId', authenticate, checkBuildOwnership, (req, res) 
     } else {
       userBuildCounts.set(build.userId, currentCount - 1);
     }
+    // Record cancellation in persistent stats
+    await recordBuildCancelled();
     console.log(`Build ${build.id} cancelled by ${req.userId.slice(0, 8)}...`);
     res.json({ message: 'Build cancelled' });
   } else {
@@ -484,8 +504,9 @@ process.on('SIGTERM', () => {
 
 // Initialize and start server
 async function start() {
-  // Initialize auth module
+  // Initialize auth and stats modules
   await initAuth();
+  await initStats();
 
   // Cleanup orphaned APK files from previous runs
   try {
